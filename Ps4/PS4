@@ -1,0 +1,401 @@
+
+cd("/Users/juanholguin/Documents/GitHub/Computational-Macro")
+using Interpolations
+include("/Users/juanholguin/Documents/GitHub/Computational-Macro/Ps3/ScaledInter.jl")
+using Optim
+using Parameters
+
+@with_kw mutable struct Par
+z::Float64 = 1    ; # Productivity
+α::Float64 = 1/3  ; # Production function
+β::Float64 = 0.98 ; # Discount factor
+η::Float64=1
+σ::Float64=2
+δ::Float64=1
+χ::Float64=5.0
+# VFI Paramters
+max_iter::Int64   = 2000  ; # Maximum number of iterations
+dist_tol::Float64 = 1E-9  ; # Tolerance for distance
+# Howard's Policy Iterations
+H_tol::Float64    = 1E-9  ; # Tolerance for policy function iteration
+end
+p=Par()
+####### Utility Function ####
+    function chi(t,p)
+        @unpack z, α, β, η, σ, δ = p
+        l_ss1 = (((((z*(z*β*α)^(α/(1-α))-δ*(z*β*α)^(1/(1-α))))^(-σ))*z*(1-α)*(z*β*α)^(α/(1-α)))/t)^(1/(η+σ))-(0.4)
+        return l_ss1
+    end
+    
+    
+    chi1=(t->chi(t,p))
+    
+    using Plots
+    plot(chi1,0:100)
+    
+    using Roots
+    
+    p = reconstruct(p,χ=find_zero(chi1,0.1))
+    
+    
+    
+    
+    function utility(k,kp,l)
+        @unpack z, α, β, η, σ,δ,χ = p
+        c=(z*k.^(α)*l.^(1-α))+((k*(1-δ))-kp)
+        if c>0
+            return ((c.^(1-σ))/(1-σ)) - χ*((l.^(1+η)))/(1+η)
+        else
+            return -Inf
+        end
+    end
+    
+    ###Steady State
+    function ss(p)
+        @unpack z, α, β, η, σ,δ,χ = p
+        l_ss = ((((z*(z*β*α)^(α/(1-α))-δ*(z*β*α)^(1/(1-α))))^(-σ)*z*(1-α)*(z*β*α)^(α/(1-α)))/χ)^(1/(η+σ));
+        k_ss=l_ss*((z*β*α)^(1/(1-α)));
+        y_ss=z*k_ss^α*l_ss^(1-α);
+        c_ss=y_ss-k_ss;
+        w_ss=z*(1-α)k_ss^α*l_ss^(-α);
+        r_ss=α*k_ss^(α-1)*l_ss^(1-α);
+        return k_ss,y_ss,c_ss,r_ss,w_ss,l_ss
+    end
+    ss(p)
+    
+    
+    #### Grid Function ###
+    
+    function kgrid(lengthk,p)
+        #I want the SS to define the max value of the Grid
+        k_ss,y_ss,c_ss,r_ss,w_ss,l_ss=ss(p)
+        grid=range(1E-3,2*k_ss,length=lengthk)
+        return grid
+    end
+    
+    
+    
+    ##### Labor FOC ####
+    function labor(l,k,kp)
+        @unpack z, α, β, η, σ,δ,χ = p
+        t=l-(((((z*k^(α)*l^(1-α)-kp + k*(1-δ))^(-σ))*z*(1-α)*l^(-α)*k^(α))/χ)^(1/η))
+        return t
+    end
+    
+    
+    nk=50
+    
+    ##### Optimal Labor for each k and k'
+    function labor_dec(length,p)
+    
+        @unpack z, α, β, η, σ,δ,χ  = p
+        gridk=kgrid(length,p)
+        labord=zeros(nk,nk)
+        for i=1:nk
+            for j=1:nk
+                labor1=(l->labor(l,gridk[i],gridk[j]))
+                labord[i,j]=try
+                find_zero(labor1, 0.1)
+                catch
+                    -Inf
+                end   
+                  
+            end
+        end
+        return labord
+    end
+    
+    labord=labor_dec(50,p)
+    #### Checking Labor SS
+    
+    kss=ss(p)
+    
+    labor11=(l->labor(l,kss[1],kss[1]))
+    find_zero(labor11,0.5)  #### Correct Steady State of Labor if I use KSS
+    
+######
+
+for i in 1:nk
+    for j in 1:nk
+        if labord[i, j] > 1
+            labord[i, j] = 1
+        end
+    end
+end
+
+for i in 1:nk
+    for j in 1:nk
+        if labord[i, j] == -Inf
+            labord[i, j] = 0
+        end
+    end
+end
+
+n_k=50
+
+####### Bellman Operator ####
+
+function Bellman(V_old,gridk)
+
+    @unpack z, α, β, η, σ,δ,χ = p
+    n_k = length(gridk)
+    V = zeros(n_k)
+    G_kp = fill(0,n_k)
+    G_c = zeros(n_k)
+    G_n = zeros(n_k)
+    Gp = zeros(n_k)
+    for i = 1:n_k
+        V_aux = zeros(n_k)
+        for j = 1:n_k
+            V_aux[j]=try
+             utility(gridk[i],gridk[j],labord[i,j]) + β*V_old[j]
+            catch
+                -Inf
+            end
+        end
+        V[i], G_kp[i] = findmax(V_aux)
+        G_n[i]=labord[i,G_kp[i]]
+        G_c[i] = z * gridk[i]^(α)*G_n[i]^(1-α) - gridk[G_kp[i]]+gridk[i]*(1-δ)
+        
+        Gp[i]=gridk[G_kp[i]]
+    end
+    return V, G_kp, G_c, G_n,Gp
+end
+
+
+
+function VFI(T::Function,gridk)
+    @unpack z, α, β, η, σ, δ,max_iter,dist_tol = p
+    n_k    = length(gridk) ; # Number of grid nodes
+    V_old  = zeros(n_k)     ; # Initial value, a vector of zeros
+    V_dist = 1              ; # Initialize distance
+    for iter=1:max_iter
+        # Update value function
+        V_new, G_kp, G_c,G_n,Gp = T(V_old)
+        # Update distance and iterations
+        V_dist = maximum(abs.(V_new./V_old.-1))
+        # Update old function
+        V_old  = V_new
+        # Report progress
+        if mod(iter,100)==0
+            println("   VFI Loop: iter=$iter, dist=",100*V_dist,"%")
+        end
+        # Check convergence and return results
+        if V_dist<=dist_tol
+            println("VFI - Grid Search - n_k=$n_k")
+            println("Iterations = $iter and Distance = ",100*V_dist,"%")
+            println("------------------------")
+            println(" ")
+            return V_new, G_kp, G_c,G_n,Gp 
+        end
+    end
+    # If loop ends there was no convergence -> Error!
+    error("Error in VFI - Grid Search - Solution not found")
+end
+
+function Solve_VFI_loop(n_k)
+    # Get Grid
+    gridk=kgrid(nk,p)
+    # Solve VFI
+    V, G_kp, G_c,G_n,Gp = VFI(x->Bellman(x,gridk),gridk)
+    # Return Solution
+    return V, G_kp, G_c,G_n,Gp
+end
+
+Vd,Gd,Cd,gn,gkp=Solve_VFI_loop(200)
+
+
+########### Optimizing over two variables ####
+
+function dcutility(k,kp,l,p)
+    @unpack z, α, β, η, σ,δ,χ = p
+    c=(z*k.^(α)*l.^(1-α))+((k*(1-δ))-kp)
+    if c>0
+        return (c.^(-σ))
+    else
+        return -Inf
+    end
+end
+
+function dnutility(k,x,p)
+    @unpack z, α, β, η, σ,δ,χ = p
+    c=(z*k.^(α)*x[1].^(1-α))+((k*(1-δ))-kp)
+    if c>0
+        return (-χ*l.^(η))
+    else
+        return -Inf
+    end
+end
+
+# Grid
+
+function Make_K_Grid(n_k,θ_k,p::Par,scale_type="Poly")
+    # Get SS
+    k_ss,y_ss,c_ss,r_ss,w_ss,l_ss = ss(p)
+    # Get k_grid
+    if θ_k≠1
+        if scale_type=="Poly"
+        k_grid = PolyRange(1E-5,2*k_ss;θ=θ_k,N=n_k) ; # Curved grid between 0 and 2*k_ss
+        elseif scale_type=="Exp"
+        # k_grid = ExpRange(1E-5,2*k_ss;θ=θ_k,N=n_k) ; # Curved grid between 0 and 2*k_ss
+        else
+        error("scale_type must be either Poly or Exp")
+        end
+    else
+    k_grid = range(1E-5,2*k_ss,length=n_k)
+    end
+    # Return
+    return k_grid
+end
+
+
+# Generate structure of model objects
+@with_kw struct Model1
+    # Parameters
+    p::Par = Par() # Model paramters in their own structure
+    # Grids
+    θ_k::Float64    = 1     # Curvature of k_grid
+    n_k::Int64      = 20    # Size of k_grid
+    n_k_fine::Int64 = 1000  # Size of fine grid for interpolation
+    k_grid          = Make_K_Grid(n_k,θ_k,p)    # k_grid for model solution
+    k_grid_fine     = Make_K_Grid(n_k_fine,1,p) # Fine grid for interpolation
+    # Value and policy functions
+    V         = Array{Float64}(undef,n_k)       # Value Function
+    G_kp      = Array{Float64}(undef,n_k)       # Policy Function
+    G_c       = Array{Float64}(undef,n_k)       # Policy Function
+    G_n       = Array{Float64}(undef,n_k)       # Policy Function
+    # Policy Function
+    V_fine    = Array{Float64}(undef,n_k_fine)  # Value Function on fine grid
+    G_kp_fine = Array{Float64}(undef,n_k_fine)  # Policy Function on fine grid
+    G_c_fine  = Array{Float64}(undef,n_k_fine)  # Policy Function on fine grid
+    # Anaytical Solutions
+    V_a       = Array{Float64}(undef,n_k_fine)  # Analytical Value Function on fine grid
+    G_kp_a    = Array{Float64}(undef,n_k_fine)  # Analytical Policy Function on fine grid
+    G_c_a     = Array{Float64}(undef,n_k_fine)  # Analytical Policy Function on fine grid
+    Euler     = Array{Float64}(undef,n_k_fine)  # Errors in Euler equation
+end
+
+M = Model1()
+
+function VFI_Fixed_Point(T::Function,M::Model1)
+    # Unpack model structure
+    @unpack p, n_k, θ_k, k_grid = M
+    # VFI paramters
+    @unpack max_iter, dist_tol = p
+    # Initialize variables for loop
+    V_old  = zeros(n_k)     ; # Initialize value function, here I just do 0, not the best option
+    # V_old  = utility.(collect(k_grid),zeros(n_k),p) ; # Start at utility with zero savings
+    V_dist = 1              ; # Initialize distance
+    println(" ")
+    println("------------------------")
+    println("VFI - n_k=$n_k - θ_k=$θ_k")
+    for iter=1:max_iter
+        # Update value function
+        V_new, G_kp, G_c = T(Model1(M,V=copy(V_old)))
+            # println("T(V) = $V_new")
+            # println("  V  = $V_old")
+        # Update distance and iterations
+        V_dist = maximum(abs.(V_new./V_old.-1))
+        # Update old function
+        V_old  = V_new
+        # Report progress
+        if mod(iter,100)==0
+            println("   VFI Loop: iter=$iter, dist=",100*V_dist,"%")
+        end
+        # Check convergence and return results
+        if V_dist<=dist_tol
+            println("VFI - n_k=$n_k - θ_k=$θ_k")
+            println("Iterations = $iter and Distance = ",100*V_dist,"%")
+            println("------------------------")
+            println(" ")
+            # Interpolate to fine grid
+            V_ip = ScaledInterpolations(M.k_grid,V_new, BSpline(Cubic(Line(OnGrid()))))
+                V_fine = V_ip.(collect(M.k_grid_fine))
+            G_kp_ip = ScaledInterpolations(M.k_grid,G_kp, BSpline(Cubic(Line(OnGrid()))))
+                G_kp_fine = G_kp_ip.(collect(M.k_grid_fine))
+            G_c_ip = ScaledInterpolations(M.k_grid,G_c, BSpline(Cubic(Line(OnGrid()))))
+                G_c_fine = G_c_ip.(collect(M.k_grid_fine))
+            G_n_ip = ScaledInterpolations(M.k_grid,G_n, BSpline(Cubic(Line(OnGrid()))))
+                G_c_fine = G_c_ip.(collect(M.k_grid_fine))
+            # Update model
+            M = Model(M; V=V_new,G_kp=G_kp,G_c=G_c,V_fine=V_fine,G_kp_fine=G_kp_fine,G_c_fine=G_c_fine)
+        
+            # Update model
+            M = Model(M; V_a=V_a,G_kp_a=G_kp_a,G_c_a=G_c_a,Euler=Euler)
+            # Return results
+            return M
+        end
+    end
+    # If loop ends there was no convergence -> Error!
+    error("Error in VFI - Solution not found")
+end
+
+
+
+# Bellman operator - Continuous Choice
+function T_cts_max(M::Model1)
+    @unpack p, n_k, k_grid, V, G_kp, G_c,G_n = M
+    @unpack z, α, β, c_min = p
+    # println("Initial V = $V")
+    # Define the interpolation of the current value function (V) for values of Vp
+    Vp = ScaledInterpolations(k_grid,V, BSpline(Cubic(Line(OnGrid()))))
+        # println("Interpolation test: Vp(k_min)=",Vp(k_grid[1])," Vp(k/2)=",Vp((k_grid[1]+k_grid[end])/2))
+    # Define the derivative (might not be used, depends on algorithm)
+        # For many methods we don't need to use ForwardDiff, we have direct measures,
+        # for example for cubic splines. I am using ForwardDiff as an example
+    # dVp(x) = ForwardDiff.derivative(Vp,x)
+    for i = 1:n_k
+        # Define objective function: Right hand side of Bellman operator
+            # Optimizer will minimize so we need the negative of the function
+        Obj_Fun = (kp,l)->(-utility(k_grid[i],kp,l) - β*Vp.(kp))
+            # println("Interpolation test: Obj_Fun(k_min)=",Obj_Fun(k_grid[1])," Obj_Fun(k/2)=",Obj_Fun((k_grid[1]+k_grid[end])/2))
+        # Min and max kp given current k
+        kp_min = k_grid[1]
+        kp_max = z*k_grid[i]^α - c_min
+            # I am leaving two ways of getting the derivative
+        # dObj_min = ForwardDiff.derivative(Obj_Fun,kp_min)
+        # dObj_min = -d_utility(k_grid[i],kp_min,p) - β*dVp(kp_min)
+        dObj_min = -1
+        if dObj_min>0
+            V[i]    = -Obj_Fun(kp_min)
+            G_kp[i] = kp_min
+        else
+        # Check if upper bound binds
+            # This can bind but shouldn't I will leave code to check but comment it
+            # I am leaving two ways of getting the derivative
+        # dObj_max = ForwardDiff.derivative(Obj_Fun,kp_max)
+        # dObj_max = -d_utility(k_grid[i],kp_max,p) - β*dVp(kp_max)
+        dObj_max = 1
+        if dObj_max<0
+            V[i]    = -bj_Fun(kp_max)
+            G_kp[i] = kp_max
+        else
+        # Bracket the solution for k=k_grid[i]
+            # In this case this is not necessary, we know the min is bracketed by [kp_min and kp_max]
+            # We can still try to use mnbrak to get a better bracket, but in this case the algorithm
+            # stops in the initial evaluation, it just verifies that we do have a bracket
+            #kp_min, kp_max = mnbrak(kp_min,(kp_max+kp_min)/2,Obj_Fun,kp_min,kp_max)
+        # Maximize
+            init=[0.0,0.0]
+            min_result = optimize(Obj_Fun,init)
+        # Check result
+            converged(min_result) || error("Failed to solve Bellman max in $(iterations(min_result)) iterations")
+        # Record results
+            V[i]     = -min_result.minimum
+            G_kp[i]  = min_result.minimizer[1]
+            G_n[i]  = min_result.minimizer[2]
+            # println("   Maximization result k_grid[$i] - kp=",min_result.minimizer," V(k)=",min_result.minimum," in $(iterations(min_result)) iterations")
+        end # Upper bound if  
+        end # Lower bound if
+    end # loop of k_grid[i]
+    # Fill in policy for consumption
+    G_c = z.*collect(k_grid).^α*G_n[i].^(1-α) .- G_kp
+    # Return Results
+        # println("T(V) = $V")
+    return V, G_kp, G_c
+end
+
+using Interpolations
+
+VFI_Fixed_Point(T_cts_max,Model1(n_k=20))
+
